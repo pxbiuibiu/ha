@@ -1,29 +1,26 @@
 blueprint:
-  name: Frigate 车辆方向检测器（带通行时间 & 去重）
+  name: Frigate 车辆方向检测器（带通行时间 & 冷却）
   description: >
-    通过 Frigate 的两个区域判断车辆移动方向。
-    使用 binary_sensor 实体监听进入事件，自动计算通行时间，
-    并防止同一车辆重复触发（基于 HA 内部去重）。
+    通过两个 Frigate 区域判断车辆移动方向。
+    使用 binary_sensor 监听进入事件，计算通行时间，并防止短时间内重复触发。
   domain: automation
-  source_url: https://github.com/pxbiuibiu/ha/blob/main/blueprint/automation/dx/frigate_car_direction.yaml
   input:
     sensor_a:
       name: 区域 A 的 Binary Sensor
-      description: 例如 binary_sensor.driveway_car_cara
+      description: 例如 binary_sensor.carin_car_occupancy
       selector:
         entity:
           domain: binary_sensor
 
     sensor_b:
       name: 区域 B 的 Binary Sensor
-      description: 例如 binary_sensor.driveway_car_carb
+      description: 例如 binary_sensor.carout_car_occupancy
       selector:
         entity:
           domain: binary_sensor
 
     debounce_seconds:
       name: 防抖时间（秒）
-      description: 区域状态需稳定多少秒才视为有效进入
       default: 0.5
       selector:
         number:
@@ -33,7 +30,6 @@ blueprint:
 
     timeout_seconds:
       name: 超时时间（秒）
-      description: 进入第一个区域后，必须在多少秒内进入第二个区域
       default: 6
       selector:
         number:
@@ -43,7 +39,7 @@ blueprint:
 
     cooldown_minutes:
       name: 冷却时间（分钟）
-      description: 同一方向触发后，多久内不再响应（防连续误报）
+      description: 同一方向触发后，多久内不再响应
       default: 1
       selector:
         number:
@@ -53,25 +49,20 @@ blueprint:
 
     action_a_to_b:
       name: 动作 - A → B
-      description: 可用变量：{{ elapsed_seconds }}, {{ direction }}
+      description: 可用 {{ elapsed_seconds }}
       default: []
       selector:
         action:
 
     action_b_to_a:
       name: 动作 - B → A
-      description: 可用变量：{{ elapsed_seconds }}, {{ direction }}
+      description: 可用 {{ elapsed_seconds }}
       default: []
       selector:
         action:
 
 mode: restart
 max_exceeded: silent
-
-# ———————— 辅助变量（用于去重）————————
-variables:
-  direction_cache_entity: "input_text.frigate_direction_cache"
-  last_trigger_time: "{{ states(direction_cache_entity) | default('') }}"
 
 trigger:
   - platform: state
@@ -89,12 +80,17 @@ trigger:
     id: "enter_b"
 
 action:
-  # ———————— 全局冷却检查 ————————
+  # ———————— 冷却检查：读取上次触发时间 ————————
   - condition: template
     value_template: >
-      {% set now_ts = now().timestamp() %}
-      {% set last_ts = (as_timestamp(states(direction_cache_entity)) or 0) %}
-      {{ (now_ts - last_ts) / 60 > cooldown_minutes }}
+      {% set last_time = states('input_text.frigate_direction_cache') | default('') %}
+      {% if last_time %}
+        {% set last_ts = as_timestamp(last_time) | default(0) %}
+        {% set now_ts = now().timestamp() %}
+        {{ (now_ts - last_ts) / 60 > cooldown_minutes }}
+      {% else %}
+        true
+      {% endif %}
 
   - choose:
       # === 先触发 A ===
@@ -118,10 +114,9 @@ action:
                   - variables:
                       time_end: "{{ now() }}"
                       elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                      direction: "{{ sensor_a }} → {{ sensor_b }}"
                   - service: input_text.set_value
                     target:
-                      entity_id: !vars direction_cache_entity
+                      entity_id: input_text.frigate_direction_cache
                     data:
                       value: "{{ now().isoformat() }}"
                   - repeat:
@@ -151,10 +146,9 @@ action:
                   - variables:
                       time_end: "{{ now() }}"
                       elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                      direction: "{{ sensor_b }} → {{ sensor_a }}"
                   - service: input_text.set_value
                     target:
-                      entity_id: !vars direction_cache_entity
+                      entity_id: input_text.frigate_direction_cache
                     data:
                       value: "{{ now().isoformat() }}"
                   - repeat:
