@@ -1,15 +1,15 @@
 blueprint:
-  name: Frigate 车辆方向检测器（带防抖与超时）
+  name: Frigate 车辆方向检测器（含通行时间计算）
   description: >
-    通过 Frigate 的两个区域判断车辆移动方向。
+    通过 Frigate 的两个区域判断车辆移动方向，并计算通行时间。
     当车辆在指定时间内先后进入两个区域，触发对应方向的动作。
-    内置防抖（debounce）和超时（timeout）机制。
+    动作中可使用变量 {{ elapsed_seconds }} 获取精确时间差（秒）。
   domain: automation
-  source_url: https://github.com/pxbiuibiu/ha/blob/main/blueprint/automation/dx/frigate_car_direction.yaml
+  source_url: https://gist.github.com/yourname/frigate-direction-timing
   input:
     camera_name:
       name: 摄像头名称
-      description: Frigate 中的摄像头名称（如 front_door）
+      description: Frigate 中的摄像头名称（如 driveway）
       selector:
         text:
 
@@ -54,14 +54,14 @@ blueprint:
 
     action_a_to_b:
       name: 动作 - A → B
-      description: 当车辆从区域 A 移动到区域 B 时执行
+      description: 车辆从区域 A 移动到 B 时执行。可用变量：{{ elapsed_seconds }}
       default: []
       selector:
         action:
 
     action_b_to_a:
       name: 动作 - B → A
-      description: 当车辆从区域 B 移动到区域 A 时执行
+      description: 车辆从区域 B 移动到 A 时执行。可用变量：{{ elapsed_seconds }}
       default: []
       selector:
         action:
@@ -69,12 +69,7 @@ blueprint:
 mode: restart
 max_exceeded: silent
 
-# 使用临时 helper（通过变量模拟状态机，避免全局实体污染）
-# 注意：HA 不支持在 blueprint 中自动创建 input_boolean/timer，
-# 因此我们使用 context + wait_template 实现无状态逻辑（推荐方式）
-
 trigger:
-  # 监听两个区域的“进入”事件（需稳定 debounce 时间）
   - platform: state
     entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_a }}"
     to: "on"
@@ -91,12 +86,13 @@ trigger:
 
 action:
   choose:
-    # 情况 1：先进入 A
+    # === 情况 1：先进入 A ===
     - conditions:
         - condition: trigger
           id: "enter_a"
       sequence:
-        # 等待在 timeout 内是否进入 B
+        - variables:
+            time_start: "{{ now() }}"
         - wait_for_trigger:
             - platform: state
               entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_b }}"
@@ -107,16 +103,23 @@ action:
             seconds: "{{ timeout_seconds }}"
         - choose:
             - conditions: "{{ wait.trigger is not none }}"
-              sequence: "{{ action_a_to_b }}"
+              sequence:
+                - variables:
+                    time_end: "{{ now() }}"
+                    elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
+                - repeat:
+                    count: 1
+                    sequence: !input action_a_to_b
             - conditions: "{{ wait.trigger is none }}"
-              sequence: [] # 超时，不执行任何操作
+              sequence: []
 
-    # 情况 2：先进入 B
+    # === 情况 2：先进入 B ===
     - conditions:
         - condition: trigger
           id: "enter_b"
       sequence:
-        # 等待在 timeout 内是否进入 A
+        - variables:
+            time_start: "{{ now() }}"
         - wait_for_trigger:
             - platform: state
               entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_a }}"
@@ -127,6 +130,12 @@ action:
             seconds: "{{ timeout_seconds }}"
         - choose:
             - conditions: "{{ wait.trigger is not none }}"
-              sequence: "{{ action_b_to_a }}"
+              sequence:
+                - variables:
+                    time_end: "{{ now() }}"
+                    elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
+                - repeat:
+                    count: 1
+                    sequence: !input action_b_to_a
             - conditions: "{{ wait.trigger is none }}"
-              sequence: [] # 超时，不执行
+              sequence: []
