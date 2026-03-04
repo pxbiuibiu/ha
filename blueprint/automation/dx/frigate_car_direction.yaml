@@ -5,7 +5,7 @@ blueprint:
     当车辆在指定时间内先后进入两个区域，触发对应方向的动作。
     内置防抖（debounce）和超时（timeout）机制。
   domain: automation
-  source_url: https://gist.github.com/yourname/frigate-direction
+  source_url: https://github.com/pxbiuibiu/ha/blob/main/blueprint/automation/dx/frigate_car_direction.yaml
   input:
     camera_name:
       name: 摄像头名称
