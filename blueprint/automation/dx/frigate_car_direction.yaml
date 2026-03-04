@@ -1,36 +1,25 @@
 blueprint:
-  name: Frigate 车辆方向检测器（含通行时间计算）
+  name: Frigate 车辆方向检测器（带通行时间 & 去重）
   description: >
-    通过 Frigate 的两个区域判断车辆移动方向，并计算通行时间。
-    当车辆在指定时间内先后进入两个区域，触发对应方向的动作。
-    动作中可使用变量 {{ elapsed_seconds }} 获取精确时间差（秒）。
+    通过 Frigate 的两个区域判断车辆移动方向。
+    使用 binary_sensor 实体监听进入事件，自动计算通行时间，
+    并防止同一车辆重复触发（基于 HA 内部去重）。
   domain: automation
-  source_url: https://gist.github.com/yourname/frigate-direction-timing
+  source_url: https://gist.github.com/yourname/frigate-direction-pro
   input:
-    camera_name:
-      name: 摄像头名称
-      description: Frigate 中的摄像头名称（如 driveway）
+    sensor_a:
+      name: 区域 A 的 Binary Sensor
+      description: 例如 binary_sensor.driveway_car_cara
       selector:
-        text:
+        entity:
+          domain: binary_sensor
 
-    zone_a:
-      name: 区域 A 名称
-      description: 第一个区域（如 cara）
+    sensor_b:
+      name: 区域 B 的 Binary Sensor
+      description: 例如 binary_sensor.driveway_car_carb
       selector:
-        text:
-
-    zone_b:
-      name: 区域 B 名称
-      description: 第二个区域（如 carb）
-      selector:
-        text:
-
-    object_type:
-      name: 目标类型
-      description: Frigate 检测的对象类型（如 car, person）
-      default: car
-      selector:
-        text:
+        entity:
+          domain: binary_sensor
 
     debounce_seconds:
       name: 防抖时间（秒）
@@ -52,16 +41,26 @@ blueprint:
           max: 30
           step: 1
 
+    cooldown_minutes:
+      name: 冷却时间（分钟）
+      description: 同一方向触发后，多久内不再响应（防连续误报）
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 60
+          step: 1
+
     action_a_to_b:
       name: 动作 - A → B
-      description: 车辆从区域 A 移动到 B 时执行。可用变量：{{ elapsed_seconds }}
+      description: 可用变量：{{ elapsed_seconds }}, {{ direction }}
       default: []
       selector:
         action:
 
     action_b_to_a:
       name: 动作 - B → A
-      description: 车辆从区域 B 移动到 A 时执行。可用变量：{{ elapsed_seconds }}
+      description: 可用变量：{{ elapsed_seconds }}, {{ direction }}
       default: []
       selector:
         action:
@@ -69,73 +68,97 @@ blueprint:
 mode: restart
 max_exceeded: silent
 
+# ———————— 辅助变量（用于去重）————————
+variables:
+  direction_cache_entity: "input_text.frigate_direction_cache"
+  last_trigger_time: "{{ states(direction_cache_entity) | default('') }}"
+
 trigger:
   - platform: state
-    entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_a }}"
+    entity_id: !input sensor_a
     to: "on"
     for:
-      seconds: "{{ debounce_seconds }}"
+      seconds: !input debounce_seconds
     id: "enter_a"
 
   - platform: state
-    entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_b }}"
+    entity_id: !input sensor_b
     to: "on"
     for:
-      seconds: "{{ debounce_seconds }}"
+      seconds: !input debounce_seconds
     id: "enter_b"
 
 action:
-  choose:
-    # === 情况 1：先进入 A ===
-    - conditions:
-        - condition: trigger
-          id: "enter_a"
-      sequence:
-        - variables:
-            time_start: "{{ now() }}"
-        - wait_for_trigger:
-            - platform: state
-              entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_b }}"
-              to: "on"
-              for:
-                seconds: "{{ debounce_seconds }}"
-          timeout:
-            seconds: "{{ timeout_seconds }}"
-        - choose:
-            - conditions: "{{ wait.trigger is not none }}"
-              sequence:
-                - variables:
-                    time_end: "{{ now() }}"
-                    elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                - repeat:
-                    count: 1
-                    sequence: !input action_a_to_b
-            - conditions: "{{ wait.trigger is none }}"
-              sequence: []
+  # ———————— 全局冷却检查 ————————
+  - condition: template
+    value_template: >
+      {% set now_ts = now().timestamp() %}
+      {% set last_ts = (as_timestamp(states(direction_cache_entity)) or 0) %}
+      {{ (now_ts - last_ts) / 60 > cooldown_minutes }}
 
-    # === 情况 2：先进入 B ===
-    - conditions:
-        - condition: trigger
-          id: "enter_b"
-      sequence:
-        - variables:
-            time_start: "{{ now() }}"
-        - wait_for_trigger:
-            - platform: state
-              entity_id: "binary_sensor.{{ camera_name }}_{{ object_type }}_{{ zone_a }}"
-              to: "on"
-              for:
-                seconds: "{{ debounce_seconds }}"
-          timeout:
-            seconds: "{{ timeout_seconds }}"
-        - choose:
-            - conditions: "{{ wait.trigger is not none }}"
-              sequence:
-                - variables:
-                    time_end: "{{ now() }}"
-                    elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                - repeat:
-                    count: 1
-                    sequence: !input action_b_to_a
-            - conditions: "{{ wait.trigger is none }}"
-              sequence: []
+  - choose:
+      # === 先触发 A ===
+      - conditions:
+          - condition: trigger
+            id: "enter_a"
+        sequence:
+          - variables:
+              time_start: "{{ now() }}"
+          - wait_for_trigger:
+              - platform: state
+                entity_id: !input sensor_b
+                to: "on"
+                for:
+                  seconds: !input debounce_seconds
+            timeout:
+              seconds: !input timeout_seconds
+          - choose:
+              - conditions: "{{ wait.trigger is not none }}"
+                sequence:
+                  - variables:
+                      time_end: "{{ now() }}"
+                      elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
+                      direction: "{{ sensor_a }} → {{ sensor_b }}"
+                  - service: input_text.set_value
+                    target:
+                      entity_id: !vars direction_cache_entity
+                    data:
+                      value: "{{ now().isoformat() }}"
+                  - repeat:
+                      count: 1
+                      sequence: !input action_a_to_b
+              - conditions: "{{ wait.trigger is none }}"
+                sequence: []
+
+      # === 先触发 B ===
+      - conditions:
+          - condition: trigger
+            id: "enter_b"
+        sequence:
+          - variables:
+              time_start: "{{ now() }}"
+          - wait_for_trigger:
+              - platform: state
+                entity_id: !input sensor_a
+                to: "on"
+                for:
+                  seconds: !input debounce_seconds
+            timeout:
+              seconds: !input timeout_seconds
+          - choose:
+              - conditions: "{{ wait.trigger is not none }}"
+                sequence:
+                  - variables:
+                      time_end: "{{ now() }}"
+                      elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
+                      direction: "{{ sensor_b }} → {{ sensor_a }}"
+                  - service: input_text.set_value
+                    target:
+                      entity_id: !vars direction_cache_entity
+                    data:
+                      value: "{{ now().isoformat() }}"
+                  - repeat:
+                      count: 1
+                      sequence: !input action_b_to_a
+              - conditions: "{{ wait.trigger is none }}"
+                sequence: []
