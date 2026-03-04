@@ -5,7 +5,7 @@ blueprint:
     使用 binary_sensor 实体监听进入事件，自动计算通行时间，
     并防止同一车辆重复触发（基于 HA 内部去重）。
   domain: automation
-  source_url: https://gist.github.com/yourname/frigate-direction-pro
+  source_url: https://github.com/pxbiuibiu/ha/blob/main/blueprint/automation/dx/frigate_car_direction.yaml
   input:
     sensor_a:
       name: 区域 A 的 Binary Sensor
