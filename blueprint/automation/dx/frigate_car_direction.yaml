@@ -1,158 +1,177 @@
 blueprint:
-  name: Frigate 车辆方向检测器（带通行时间 & 冷却）
-  description: >
-    通过两个 Frigate 区域判断车辆移动方向。
-    使用 binary_sensor 监听进入事件，计算通行时间，并防止短时间内重复触发。
+  name: "Frigate 方向判断通知（两区域：zone1 -> zone2）最终修复版"
+  description: >-
+    基于 Frigate reviews 事件，判断物体是否从 zone1 进入 zone2，
+    并发送包含时间信息和截图的通知。修复了摄像头匹配、方向判断、模板语法核心错误。
+    参考：SgtBatten/HA_blueprints 的蓝图风格。
   domain: automation
+  source_url: https://github.com/SgtBatten/HA_blueprints
   input:
-    sensor_a:
-      name: 区域 A 的 Binary Sensor
-      description: 例如 binary_sensor.carin_car_occupancy
+    # 基础配置
+    camera:
+      name: Frigate 摄像头
+      description: 选择要监听的 Frigate 摄像头（camera 实体）。
       selector:
         entity:
-          domain: binary_sensor
+          filter:
+            integration: frigate
+            domain: camera
+    mqtt_topic:
+      name: MQTT 主题
+      description: Frigate 发送 reviews 消息的主题，默认 frigate/reviews。
+      default: "frigate/reviews"
+    zone1:
+      name: 区域 1（起始区域）
+      description: 先进入的区域名称，与 Frigate zone 配置完全一致（区分大小写）。
+      default: "zone1"
+    zone2:
+      name: 区域 2（目标区域）
+      description: 后进入的区域名称，与 Frigate zone 配置完全一致（区分大小写）。
+      default: "zone2"
+    label:
+      name: 关注的对象标签
+      description: 需要判断方向的对象标签，例如 person、car。
+      default: "person"
 
-    sensor_b:
-      name: 区域 B 的 Binary Sensor
-      description: 例如 binary_sensor.carout_car_occupancy
+    # 通知配置
+    notify_device:
+      name: 通知设备（移动端）
+      description: 选择一个运行 HA Companion App 的设备接收通知。
       selector:
-        entity:
-          domain: binary_sensor
+        device:
+          filter:
+            integration: mobile_app
+    base_url:
+      name: Base URL
+      description: >-
+        Home Assistant 的外部访问地址（需要带 http:// 或 https://，末尾不要加/），
+        用于拼接截图 URL。
+      default: ""
+    title:
+      name: 通知标题
+      default: "方向检测：有人从 {{ zone1 }} 走向 {{ zone2 }}"
+    message:
+      name: 通知内容
+      default: >-
+        检测到 {{ label }} 从 {{ zone1 }} 进入 {{ zone2 }}。
+        事件开始时间：{{ event_start_time }}，
+        触发时间：{{ trigger_time }}。
 
-    debounce_seconds:
-      name: 防抖时间（秒）
-      default: 0.5
+    # 调试开关
+    debug:
+      name: 调试模式
+      description: 在日志中输出更多信息，方便排查问题。
+      default: false
       selector:
-        number:
-          min: 0.1
-          max: 5
-          step: 0.1
+        boolean:
 
-    timeout_seconds:
-      name: 超时时间（秒）
-      default: 6
-      selector:
-        number:
-          min: 1
-          max: 30
-          step: 1
+mode: parallel
+trigger_variables:
+  mqtt_topic: !input mqtt_topic
 
-    cooldown_minutes:
-      name: 冷却时间（分钟）
-      description: 同一方向触发后，多久内不再响应
-      default: 1
-      selector:
-        number:
-          min: 0
-          max: 60
-          step: 1
+triggers:
+  - trigger: mqtt
+    topic: "{{mqtt_topic}}"
+    id: frigate-review
 
-    action_a_to_b:
-      name: 动作 - A → B
-      description: 可用 {{ elapsed_seconds }}
-      default: []
-      selector:
-        action:
+variables:
+  # 输入变量
+  input_camera: !input camera
+  # 核心修复：正确的模板语法提取摄像头名称（兼容HA所有版本）
+  input_camera_name: >-
+    {{ [ input_camera | expand | map(attribute='attributes.camera_name') | first | default('none') ] }}
+  input_zone1: !input zone1
+  input_zone2: !input zone2
+  input_label: !input label
+  input_notify_device: !input notify_device
+  input_base_url: !input base_url
+  input_debug: !input debug
 
-    action_b_to_a:
-      name: 动作 - B → A
-      description: 可用 {{ elapsed_seconds }}
-      default: []
-      selector:
-        action:
+  # 从 trigger 中解析 payload
+  event: "{{ trigger.payload_json }}"
+  type: "{{ event.type }}"
+  camera: "{{ event.after.camera }}"
+  camera_name: "{{ camera | replace('_', ' ') | title }}"
+  event_id: "{{ event.after.id }}"
+  # 正确的字段路径：Frigate reviews事件的zones/objects直接在after下
+  before_zones: "{{ event.before.zones | default([]) }}"
+  after_zones: "{{ event.after.zones | default([]) }}"
+  after_objects: "{{ event.after.objects | default([]) }}"
 
-mode: restart
-max_exceeded: silent
+  # 事件时间
+  event_start_time: >-
+    {{ event.after.start_time | timestamp_custom('%Y-%m-%d %H:%M:%S') }}
+  trigger_time: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-trigger:
-  - platform: state
-    entity_id: !input sensor_a
-    to: "on"
-    for:
-      seconds: !input debounce_seconds
-    id: "enter_a"
+  # 正确的方向判断逻辑
+  was_in_zone1: "{{ input_zone1 in before_zones }}"
+  was_not_in_zone2: "{{ input_zone2 not in before_zones }}"
+  now_in_zone2: "{{ input_zone2 in after_zones }}"
+  direction_ok: >-
+    {{ was_in_zone1 and was_not_in_zone2 and now_in_zone2 }}
 
-  - platform: state
-    entity_id: !input sensor_b
-    to: "on"
-    for:
-      seconds: !input debounce_seconds
-    id: "enter_b"
+  # 截图 / 视频 URL（避免空值报错）
+  snapshot_url: >-
+    {{ input_base_url }}/api/frigate/notifications/{{ event_id }}/snapshot.jpg
+  clip_url: >-
+    {{ input_base_url }}/api/frigate/notifications/{{ event_id }}/{{ camera }}/clip.mp4
 
-action:
-  # ———————— 冷却检查：读取上次触发时间 ————————
+conditions:
+  - condition: trigger
+    id: frigate-review
+  # 只有update事件才有before状态，才能判断区域变化
   - condition: template
-    value_template: >
-      {% set last_time = states('input_text.frigate_direction_cache') | default('') %}
-      {% if last_time %}
-        {% set last_ts = as_timestamp(last_time) | default(0) %}
-        {% set now_ts = now().timestamp() %}
-        {{ (now_ts - last_ts) / 60 > cooldown_minutes }}
-      {% else %}
-        true
-      {% endif %}
+    value_template: "{{ type == 'update' }}"
+  # 摄像头名称匹配（现在模板语法正确）
+  - condition: template
+    value_template: "{{ camera in input_camera_name }}"
+  # 检测到目标对象
+  - condition: template
+    value_template: "{{ input_label in after_objects }}"
+  # 方向判断条件
+  - condition: template
+    value_template: "{{ direction_ok }}"
 
+actions:
   - choose:
-      # === 先触发 A ===
+      # 调试输出
       - conditions:
-          - condition: trigger
-            id: "enter_a"
+          - "{{ input_debug }}"
         sequence:
-          - variables:
-              time_start: "{{ now() }}"
-          - wait_for_trigger:
-              - platform: state
-                entity_id: !input sensor_b
-                to: "on"
-                for:
-                  seconds: !input debounce_seconds
-            timeout:
-              seconds: !input timeout_seconds
-          - choose:
-              - conditions: "{{ wait.trigger is not none }}"
-                sequence:
-                  - variables:
-                      time_end: "{{ now() }}"
-                      elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                  - service: input_text.set_value
-                    target:
-                      entity_id: input_text.frigate_direction_cache
-                    data:
-                      value: "{{ now().isoformat() }}"
-                  - repeat:
-                      count: 1
-                      sequence: !input action_a_to_b
-              - conditions: "{{ wait.trigger is none }}"
-                sequence: []
+          - action: logbook.log
+            data:
+              name: Frigate 方向判断
+              message: |
+                DEBUG 信息:
+                触发类型: {{ type }}
+                事件摄像头: {{ camera }}
+                配置摄像头名称: {{ input_camera_name }}
+                之前所在区域: {{ before_zones }}
+                当前所在区域: {{ after_zones }}
+                检测对象: {{ after_objects }}
+                之前在zone1: {{ was_in_zone1 }}
+                之前不在zone2: {{ was_not_in_zone2 }}
+                现在在zone2: {{ now_in_zone2 }}
+                方向判断结果: {{ direction_ok }}
+                事件ID: {{ event_id }}
+                截图URL: {{ snapshot_url }}
 
-      # === 先触发 B ===
-      - conditions:
-          - condition: trigger
-            id: "enter_b"
-        sequence:
-          - variables:
-              time_start: "{{ now() }}"
-          - wait_for_trigger:
-              - platform: state
-                entity_id: !input sensor_a
-                to: "on"
-                for:
-                  seconds: !input debounce_seconds
-            timeout:
-              seconds: !input timeout_seconds
-          - choose:
-              - conditions: "{{ wait.trigger is not none }}"
-                sequence:
-                  - variables:
-                      time_end: "{{ now() }}"
-                      elapsed_seconds: "{{ (time_end - time_start).total_seconds() | round(2) }}"
-                  - service: input_text.set_value
-                    target:
-                      entity_id: input_text.frigate_direction_cache
-                    data:
-                      value: "{{ now().isoformat() }}"
-                  - repeat:
-                      count: 1
-                      sequence: !input action_b_to_a
-              - conditions: "{{ wait.trigger is none }}"
-                sequence: []
+    # 默认：发送通知
+    default:
+      - device_id: !input notify_device
+        domain: mobile_app
+        type: notify
+        title: !input title
+        message: !input message
+        data:
+          tag: "{{ event_id }}"
+          group: "frigate-direction"
+          color: "#FF5722"
+          # Android
+          subject: "{{ input_zone1 }} -> {{ input_zone2 }}"
+          image: "{{ snapshot_url }}"
+          clickAction: "{{ clip_url }}"
+          # iOS
+          attachment:
+            url: "{{ snapshot_url }}"
+            content-type: "jpeg"
