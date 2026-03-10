@@ -5,7 +5,7 @@ blueprint:
     并发送包含时间信息和截图的通知。修复了摄像头匹配、方向判断、模板语法核心错误。
     参考：SgtBatten/HA_blueprints 的蓝图风格。
   domain: automation
-  source_url: https://github.com/SgtBatten/HA_blueprints
+  source_url: https://github.com/pxbiuibiu/ha/blob/main/blueprint/automation/dx/frigate_car_direction.yaml
   input:
     # 基础配置
     camera:
